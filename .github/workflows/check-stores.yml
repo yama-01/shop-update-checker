@@ -1,0 +1,29 @@
+name: Check stores for updates
+
+on:
+  schedule:
+    # 毎日1回、日本時間9:00に実行（UTC基準で0:00。時間を変えたい場合はここを調整）
+    - cron: "0 0 * * *"
+  workflow_dispatch: # 手動実行ボタンも使えるようにする
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run checker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        run: python checker.py
