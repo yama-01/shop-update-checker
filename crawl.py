@@ -1,11 +1,10 @@
 """
-登録された「お店」のページを毎日巡回し、その日のチェック結果を1通のLINEメッセージ
-（ダイジェスト）にまとめて送信するスクリプト。更新の有無にかかわらず毎日通知する。
+毎日0時(JST)に実行する巡回スクリプト。
+登録された「お店」のページを巡回し、前回チェック時からの差分（新着）を検知して
+Supabaseのupdate_logsに記録する。LINE通知はここでは行わない
+（通知は notify.py が9時に別途実行して担当する）。
 
-また、あとで日次・週次・月次の集計サイトを作れるように、チェック結果を毎回
-Supabaseのupdate_logsテーブルに記録する。
-
-GitHub Actionsから毎朝9時(JST)に定期実行される想定。
+GitHub Actionsから毎日0時(JST)に定期実行される想定。
 """
 
 import os
@@ -13,13 +12,10 @@ import re
 import sys
 from datetime import datetime, timezone
 from urllib.parse import urljoin
-from zoneinfo import ZoneInfo
 
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-
-JST = ZoneInfo("Asia/Tokyo")
 
 # 「cast/123456.html」のようなキャスト個別ページのURLパターン
 CAST_URL_PATTERN = re.compile(r"/cast/\d+\.html$")
@@ -30,7 +26,6 @@ PROFILE_URL_PATTERN = re.compile(r"/profile\.html\?id=[0-9a-f]{16,}", re.IGNOREC
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -39,7 +34,8 @@ HEADERS = {
 }
 
 MAX_LINKS_STORED = 2000
-MAX_NOTIFY_PER_STORE = 10
+# update_logsに保存する新着リンクのサンプル件数（表示・記録用の上限。件数自体はnew_countで正確に保持する）
+SAMPLE_ITEMS_LIMIT = 10
 
 
 def get_stores():
@@ -64,14 +60,19 @@ def update_store(store_id, seen_links):
     )
 
 
-def log_check_result(store_id, store_name, status, new_items, error_message=None):
-    """このチェック結果をupdate_logsに記録する（日次・週次・月次の集計サイト用の元データ）"""
+def log_check_result(store_id, store_name, group_name, store_type, status, new_items_all, error_message=None):
+    """このチェック結果をupdate_logsに記録する。new_countは実際の新着数を正確に保持し、
+    new_itemsにはSAMPLE_ITEMS_LIMIT件までのサンプルのみ保存する（通知メッセージの表示用）。"""
     payload = {
         "store_id": store_id,
         "store_name": store_name,
+        "group_name": group_name,
+        "store_type": store_type,
         "status": status,
-        "new_count": len(new_items),
-        "new_items": [{"title": title, "url": href} for title, href in new_items],
+        "new_count": len(new_items_all),
+        "new_items": [
+            {"title": title, "url": href} for title, href in new_items_all[:SAMPLE_ITEMS_LIMIT]
+        ],
     }
     if error_message:
         payload["error_message"] = error_message[:500]
@@ -86,22 +87,6 @@ def log_check_result(store_id, store_name, status, new_items, error_message=None
             print(f"[ログ保存エラー] {store_name}: {r.status_code} {r.text}", file=sys.stderr)
     except Exception as e:
         print(f"[ログ保存エラー] {store_name}: {e}", file=sys.stderr)
-
-
-def send_line(text: str):
-    if not text:
-        return
-    resp = requests.post(
-        "https://api.line.me/v2/bot/message/broadcast",
-        headers={
-            "Authorization": f"Bearer {LINE_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json={"messages": [{"type": "text", "text": text[:5000]}]},
-        timeout=20,
-    )
-    if resp.status_code >= 300:
-        print(f"LINE送信エラー: {resp.status_code} {resp.text}", file=sys.stderr)
 
 
 def fetch_rss_links(url):
@@ -175,33 +160,16 @@ def fetch_page_links(url):
     return links[:150]
 
 
-def build_updated_block(name, store_type, items):
-    """1店舗分の「更新あり」ブロックを、通知メッセージ用に整形する"""
-    shown = items[:3]
-    remaining = len(items) - len(shown)
-
-    if store_type in ("cast_list", "girl_list", "profile_list"):
-        lines = [f"【{name}】新人が入店しました"]
-    else:
-        lines = [f"【{name}】{len(items)}件の新着"]
-    for title, href in shown:
-        lines.append(href)
-
-    if remaining > 0:
-        lines.append(f"…ほか{remaining}件")
-    return "\n".join(lines)
-
-
 def main():
     stores = get_stores()
     print(f"{len(stores)}件のお店をチェックします")
-
-    blocks = []
 
     for store in stores:
         store_id = store["id"]
         name = store["name"]
         store_type = store["type"]
+        group_name = store.get("group_name")
+
         try:
             if store_type == "rss":
                 links = fetch_rss_links(store["url"])
@@ -216,8 +184,7 @@ def main():
                 links = fetch_page_links(store["url"])
         except Exception as e:
             print(f"[エラー] {name}: {e}", file=sys.stderr)
-            blocks.append(f"【{name}】⚠️チェックに失敗しました")
-            log_check_result(store_id, name, "error", [], error_message=str(e))
+            log_check_result(store_id, name, group_name, store_type, "error", [], error_message=str(e))
             continue
 
         seen = set(store.get("seen_links") or [])
@@ -228,35 +195,28 @@ def main():
         for title, href in links:
             if href not in current_hrefs:
                 current_hrefs.append(href)
-            if href not in seen and len(new_items) < MAX_NOTIFY_PER_STORE:
+            if href not in seen:
                 new_items.append((title, href))
 
         # 初回チェック時は基準データを保存するだけ（大量通知を防ぐため「更新あり」とはしない）
         if is_first_check:
-            blocks.append(f"【{name}】初回チェックのため基準データを保存しました")
-            log_check_result(store_id, name, "first_check", [])
+            log_check_result(store_id, name, group_name, store_type, "first_check", [])
             print(f"[初回] {name}")
         elif new_items:
-            blocks.append(build_updated_block(name, store_type, new_items))
-            log_check_result(store_id, name, "updated", new_items)
+            log_check_result(store_id, name, group_name, store_type, "updated", new_items)
             print(f"[更新あり] {name}: {len(new_items)}件の新着")
         else:
-            blocks.append(f"【{name}】更新なし")
-            log_check_result(store_id, name, "no_update", [])
+            log_check_result(store_id, name, group_name, store_type, "no_update", [])
             print(f"[更新なし] {name}")
 
-        # LINE送信の成否に関わらず、既知リンクとして必ず保存する
-        # 重要：今回取得できたリンクだけで上書きせず、これまでの既知リンクと合算（マージ）する。
-        # ページの表示順や一部入れ替わりで今回たまたま表示されなかった過去のリンクも、
-        # 既知として保持し続けることで、同じキャストを繰り返し「新着」と誤検知しないようにする。
+        # 既知リンクとして必ず保存する（重要：今回取得できたリンクだけで上書きせず、
+        # これまでの既知リンクと合算（マージ）する。ページの表示順や一部入れ替わりで
+        # 今回たまたま表示されなかった過去のリンクも既知として保持し続けることで、
+        # 同じ項目を繰り返し「新着」と誤検知しないようにする）
         merged_links = list(seen | set(current_hrefs))
         update_store(store_id, merged_links[:MAX_LINKS_STORED])
 
-    # 更新の有無にかかわらず、全店舗分の結果を1通のダイジェストにまとめて毎日送信する
-    today_str = datetime.now(JST).strftime("%Y-%m-%d")
-    message = f"◆本日の更新チェック結果({today_str})\n\n" + "\n\n".join(blocks)
-    send_line(message)
-    print("[LINE送信] 本日分のダイジェストを送信しました")
+    print("[巡回完了] 結果をupdate_logsに記録しました（LINE通知は次回のnotify.py実行時に送信されます）")
 
 
 if __name__ == "__main__":
