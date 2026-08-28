@@ -39,9 +39,15 @@ def get_todays_crawl_logs():
     today_start_jst = datetime.now(JST).replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_utc = today_start_jst.astimezone(timezone.utc).isoformat()
     r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/update_logs"
-        f"?checked_at=gte.{today_start_utc}&order=checked_at.asc&select=*",
+        f"{SUPABASE_URL}/rest/v1/update_logs",
         headers=HEADERS,
+        # paramsを使うことで、日時に含まれる「+」等の記号がURL上で正しくエンコードされるようにする
+        # （文字列結合で直接URLに埋め込むと「+00:00」の「+」がスペースとして扱われ400エラーになる）
+        params={
+            "checked_at": f"gte.{today_start_utc}",
+            "order": "checked_at.asc",
+            "select": "*",
+        },
         timeout=20,
     )
     r.raise_for_status()
