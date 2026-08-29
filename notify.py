@@ -20,9 +20,6 @@ import requests
 
 JST = ZoneInfo("Asia/Tokyo")
 
-# このtypeのお店は「新人が入店した」という文脈で件数を表示する
-HIRE_TYPES = {"cast_list", "girl_list", "profile_list"}
-
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
@@ -82,7 +79,8 @@ def build_group_block(group_name, members):
 
     if updated:
         total_new = sum(m["new_count"] for m in updated)
-        is_hire = all((m.get("store_type") in HIRE_TYPES) for m in updated)
+        # is_staff_listはcrawl.py側で確定済みの値（storesのis_staff_list列、未設定ならtypeから自動判定）
+        is_hire = all(m.get("is_staff_list") for m in updated)
         if is_hire:
             lines.append(header + f"{total_new}名の入店がありました")
         else:
