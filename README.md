@@ -57,6 +57,8 @@ Supabaseの「Table Editor」→「stores」テーブルに、お店を1件ず�
 | `name` | LINE通知に表示するお店の名前 |
 | `url`  | 巡回するページのURL |
 | `type` | 監視方法（下記を参照） |
+| `link_pattern` | `type`が`custom_pattern`の場合に使う、新着ページを判定するための正規表現（任意） |
+| `is_staff_list` | 通知文言を「〇名の入店がありました」にするかどうか（任意。空欄なら`type`から自動判定） |
 | `group_name` | 系列店・グループの名前（任意）。同じ名前を複数の店舗に設定すると、通知時に合算して1行にまとまる |
 
 `type`に指定できる値:
@@ -66,6 +68,18 @@ Supabaseの「Table Editor」→「stores」テーブルに、お店を1件ず�
 - `cast_list` : `/cast/123456.html`のようなキャスト個別ページの一覧を監視
 - `girl_list` : `/girl/115/`のような個別ページの一覧を監視
 - `profile_list` : `/profile.html?id=xxxxxxxxxxxxxxxx`のようなプロフィールページの一覧を監視
+- `custom_pattern` : 上記のどれにも当てはまらないサイト用の汎用タイプ。`link_pattern`列に
+  正規表現を指定すると、そのパターンに一致するリンクだけを新着として検知する
+
+**`custom_pattern`の使い方**: サイトによってURLの形式は様々なので、上の4つの決め打ちパターンに
+当てはまらない場合はこちらを使います。例えば`https://e1ns.jp/girls/newcomer-list`というページで
+`https://e1ns.jp/girls/detail/85574`のようなリンクの新着を検知したい場合、`type`を
+`custom_pattern`、`link_pattern`を`/girls/detail/\d+`として登録してください。新しいサイトを
+追加するたびにコードを直す必要がなく、Supabase側の設定だけで対応できます。
+
+`is_staff_list`の使い方: `cast_list`/`girl_list`/`profile_list`は自動的に「〇名の入店が
+ありました」という表記になります。`custom_pattern`など他のtypeでも同じ表記にしたい場合は、
+この列に`true`を入力してください（未入力の場合は「〇件の新着がありました」という汎用表記になります）。
 
 `group_name`の例: 「A株式会社」の新宿店・池袋店・五反田店をそれぞれ1行ずつ登録し、
 3行すべての`group_name`に「A株式会社」と入力すると、いずれかの店舗に新着があった日は

@@ -7,7 +7,16 @@ create table if not exists stores (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   url text not null,
-  type text not null default 'page' check (type in ('page', 'rss', 'cast_list', 'girl_list', 'profile_list')),
+  type text not null default 'page' check (
+    type in ('page', 'rss', 'cast_list', 'girl_list', 'profile_list', 'custom_pattern')
+  ),
+  -- type='custom_pattern'の場合に使う、新着ページを判定するための正規表現
+  -- （例: e1ns.jpなら '/girls/detail/\d+'）。サイトごとにURL構造が違っても
+  -- コードを直さずここで対応できるようにするための汎用設定。
+  link_pattern text,
+  -- 「〇名の入店がありました」（true）か「〇件の新着がありました」（false）かの表示切り替え。
+  -- 空欄(NULL)の場合はtypeから自動判定される（cast_list/girl_list/profile_listはtrue扱い）。
+  is_staff_list boolean,
   -- 系列店・グループの名前。同じgroup_nameを持つ店舗はLINE通知で1つにまとめて集計される。
   -- 単独の店舗はNULLのままでOK（その場合は店舗名単位で個別に通知される）
   group_name text,
@@ -36,6 +45,7 @@ create table if not exists update_logs (
   store_name text not null,
   group_name text,
   store_type text,
+  is_staff_list boolean not null default false,
   checked_at timestamptz not null default now(),
   status text not null check (status in ('updated', 'no_update', 'first_check', 'error')),
   new_count integer not null default 0,
@@ -68,11 +78,23 @@ create index if not exists update_logs_store_checked_idx on update_logs (store_i
 --   ('A株式会社 新宿店', 'https://example.com/shinjuku/cast/', 'cast_list', 'A株式会社'),
 --   ('A株式会社 池袋店',   'https://example.com/ikebukuro/cast/', 'cast_list', 'A株式会社'),
 --   ('A株式会社 五反田店', 'https://example.com/gotanda/cast/', 'cast_list', 'A株式会社');
+--
+-- 独自のURLパターンを使う場合（例: e1ns.jpの「/girls/detail/数字」形式のページを新着として検知）
+-- insert into stores (name, url, type, link_pattern, is_staff_list) values
+--   ('e1ns 新人一覧', 'https://e1ns.jp/girls/newcomer-list', 'custom_pattern', '/girls/detail/\d+', true);
 
 
 -- ==============================
 -- 既存プロジェクトへの追加分（すでにテーブルを作成済みの場合はここだけ実行すればOK）
 -- ==============================
 -- alter table stores add column if not exists group_name text;
+-- alter table stores add column if not exists link_pattern text;
+-- alter table stores add column if not exists is_staff_list boolean;
 -- alter table update_logs add column if not exists group_name text;
 -- alter table update_logs add column if not exists store_type text;
+-- alter table update_logs add column if not exists is_staff_list boolean not null default false;
+--
+-- -- typeの制約に custom_pattern を追加する場合（すでにtype制約付きでテーブル作成済みの場合のみ必要）
+-- alter table stores drop constraint if exists stores_type_check;
+-- alter table stores add constraint stores_type_check
+--   check (type in ('page', 'rss', 'cast_list', 'girl_list', 'profile_list', 'custom_pattern'));

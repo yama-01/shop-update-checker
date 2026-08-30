@@ -24,6 +24,10 @@ GIRL_URL_PATTERN = re.compile(r"/girl/\d+/$")
 # 「profile.html?id=xxxxxxxx」のようなプロフィールページのURLパターン
 PROFILE_URL_PATTERN = re.compile(r"/profile\.html\?id=[0-9a-f]{16,}", re.IGNORECASE)
 
+# type=cast_list / girl_list / profile_list / custom_patternのお店は「新人が入店した」という
+# 文脈で件数を表示するデフォルト対象（storesの`is_staff_list`列で個別に上書き可能）
+DEFAULT_STAFF_LIST_TYPES = {"cast_list", "girl_list", "profile_list"}
+
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
@@ -60,7 +64,7 @@ def update_store(store_id, seen_links):
     )
 
 
-def log_check_result(store_id, store_name, group_name, store_type, status, new_items_all, error_message=None):
+def log_check_result(store_id, store_name, group_name, store_type, is_staff_list, status, new_items_all, error_message=None):
     """このチェック結果をupdate_logsに記録する。new_countは実際の新着数を正確に保持し、
     new_itemsにはSAMPLE_ITEMS_LIMIT件までのサンプルのみ保存する（通知メッセージの表示用）。"""
     payload = {
@@ -68,6 +72,7 @@ def log_check_result(store_id, store_name, group_name, store_type, status, new_i
         "store_name": store_name,
         "group_name": group_name,
         "store_type": store_type,
+        "is_staff_list": is_staff_list,
         "status": status,
         "new_count": len(new_items_all),
         "new_items": [
@@ -147,6 +152,29 @@ def fetch_profile_list_links(url):
     return hrefs
 
 
+def fetch_pattern_list_links(url, pattern):
+    """お店ごとに登録された正規表現（link_pattern）に一致するリンクのみを抽出する汎用関数。
+    サイトごとにURL構造がバラバラなため、コードを直接変更しなくても
+    Supabase側の設定だけで新しいサイト構造に対応できるようにするためのもの。"""
+    if not pattern:
+        raise ValueError("type=custom_patternのお店にはlink_pattern（正規表現）の設定が必要です")
+    compiled = re.compile(pattern)
+    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    hrefs = []
+    seen_in_page = set()
+    for a in soup.find_all("a", href=True):
+        href = urljoin(url, a["href"])
+        # クエリやフラグメントを除いた素のURLで判定・保存する（?ref=xxxのような追跡パラメータで
+        # 同じページが別リンクとして重複検知されるのを防ぐ）
+        clean_href = href.split("?")[0].split("#")[0]
+        if compiled.search(clean_href) and clean_href not in seen_in_page:
+            seen_in_page.add(clean_href)
+            hrefs.append(clean_href)
+    return hrefs
+
+
 def fetch_page_links(url):
     r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
@@ -169,6 +197,10 @@ def main():
         name = store["name"]
         store_type = store["type"]
         group_name = store.get("group_name")
+        # is_staff_listが未設定(null)の場合は、typeから自動判定する
+        is_staff_list = store.get("is_staff_list")
+        if is_staff_list is None:
+            is_staff_list = store_type in DEFAULT_STAFF_LIST_TYPES
 
         try:
             if store_type == "rss":
@@ -180,11 +212,14 @@ def main():
                 links = [(None, href) for href in fetch_girl_list_links(store["url"])]
             elif store_type == "profile_list":
                 links = [(None, href) for href in fetch_profile_list_links(store["url"])]
+            elif store_type == "custom_pattern":
+                # お店ごとにSupabaseのlink_pattern列で正規表現を設定してもらう汎用タイプ
+                links = [(None, href) for href in fetch_pattern_list_links(store["url"], store.get("link_pattern"))]
             else:
                 links = fetch_page_links(store["url"])
         except Exception as e:
             print(f"[エラー] {name}: {e}", file=sys.stderr)
-            log_check_result(store_id, name, group_name, store_type, "error", [], error_message=str(e))
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "error", [], error_message=str(e))
             continue
 
         seen = set(store.get("seen_links") or [])
@@ -200,13 +235,13 @@ def main():
 
         # 初回チェック時は基準データを保存するだけ（大量通知を防ぐため「更新あり」とはしない）
         if is_first_check:
-            log_check_result(store_id, name, group_name, store_type, "first_check", [])
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "first_check", [])
             print(f"[初回] {name}")
         elif new_items:
-            log_check_result(store_id, name, group_name, store_type, "updated", new_items)
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "updated", new_items)
             print(f"[更新あり] {name}: {len(new_items)}件の新着")
         else:
-            log_check_result(store_id, name, group_name, store_type, "no_update", [])
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "no_update", [])
             print(f"[更新なし] {name}")
 
         # 既知リンクとして必ず保存する（重要：今回取得できたリンクだけで上書きせず、
