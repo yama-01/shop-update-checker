@@ -180,10 +180,13 @@ def fetch_page_links(url):
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     links = []
+    seen_hrefs = set()
     for a in soup.find_all("a", href=True):
         href = urljoin(url, a["href"])
         title = a.get_text(strip=True)
-        if title and href.startswith("http"):
+        # 同じリンクがページ内の複数箇所（一覧と右カラムなど）に出てきても1件だけ拾う
+        if title and href.startswith("http") and href not in seen_hrefs:
+            seen_hrefs.add(href)
             links.append((title, href))
     return links[:150]
 
@@ -227,11 +230,15 @@ def main():
 
         current_hrefs = []
         new_items = []
+        new_item_hrefs = set()
         for title, href in links:
             if href not in current_hrefs:
                 current_hrefs.append(href)
-            if href not in seen:
+            # 同じURLがページ内の複数箇所（例：中央の一覧と右カラムに両方表示される等）に
+            # 出てきても、新着としては1件だけカウントする
+            if href not in seen and href not in new_item_hrefs:
                 new_items.append((title, href))
+                new_item_hrefs.add(href)
 
         # 初回チェック時は基準データを保存するだけ（大量通知を防ぐため「更新あり」とはしない）
         if is_first_check:
