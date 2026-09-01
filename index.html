@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>更新状況カレンダー</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f5f6f8;
+    --card-bg: #ffffff;
+    --border: #dfe3e8;
+    --text: #222;
+    --muted: #777;
+    --accent: #2f6fed;
+    --accent-bg: #eaf1ff;
+    --danger: #d33;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .wrap {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 24px 16px 60px;
+  }
+
+  /* --- 本体 --- */
+  h1.title {
+    font-size: 18px;
+    margin: 0 0 18px;
+  }
+  select#storeSelect {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 15px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    margin-bottom: 20px;
+  }
+  .month-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .month-nav button {
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .month-nav button:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+  .month-nav .ym {
+    font-size: 17px;
+    font-weight: 600;
+  }
+  table.cal {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  table.cal th, table.cal td {
+    border: 1px solid var(--border);
+    text-align: center;
+    padding: 0;
+  }
+  table.cal th {
+    background: #fafafa;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    padding: 8px 0;
+  }
+  table.cal th.sun { color: #d33; }
+  table.cal th.sat { color: #2f6fed; }
+  table.cal td {
+    height: 56px;
+    vertical-align: top;
+    position: relative;
+  }
+  table.cal td.empty { background: #fbfbfb; }
+  .day-num {
+    font-size: 11px;
+    color: var(--muted);
+    display: block;
+    text-align: left;
+    padding: 4px 6px 0;
+  }
+  .day-count {
+    display: block;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-top: 4px;
+  }
+  td.today .day-num {
+    background: var(--accent-bg);
+    border-radius: 4px;
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 3px 0 0 4px;
+  }
+  .total-box {
+    margin-top: 18px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+  .total-box .label { font-size: 13px; color: var(--muted); }
+  .total-box .num { font-size: 26px; font-weight: 700; margin-top: 4px; }
+  .status {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    padding: 30px 0;
+  }
+  .status.err { color: var(--danger); }
+  .note {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 16px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+  <div class="wrap" id="app">
+    <h1 class="title">更新状況カレンダー</h1>
+
+    <select id="storeSelect"><option>読み込み中...</option></select>
+
+    <div class="month-nav">
+      <button id="prevBtn">&lt; 前月</button>
+      <div class="ym" id="ymLabel">----/--</div>
+      <button id="nextBtn">翌月 &gt;</button>
+    </div>
+
+    <table class="cal">
+      <thead>
+        <tr>
+          <th class="sun">日</th><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th class="sat">土</th>
+        </tr>
+      </thead>
+      <tbody id="calBody"></tbody>
+    </table>
+
+    <div class="total-box">
+      <div class="label">この月の合計</div>
+      <div class="num" id="monthTotal">-</div>
+    </div>
+
+    <div class="status" id="statusMsg" style="display:none;"></div>
+
+    <div class="note">
+      ※ 数字はその日に検知された新着（入店）件数です。系列店・グループはまとめて集計しています。
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ============================================================
+  // 設定（公開前にここを埋めてください）
+  // ============================================================
+  var SUPABASE_URL = "https://ogqkddmcopjvmnwzvhlj.supabase.co";
+  var SUPABASE_ANON_KEY = "sb_publishable_4xpobgaEHuHjrx0WiSNgpg_IsnAagfP";
+  // ============================================================
+
+  var ALL_KEY = "__ALL__";
+  var ALL_LABEL = "全店舗合計";
+
+  // ---------- 日付ユーティリティ（すべてJST基準） ----------
+
+  // 現在時刻をJSTのyear/month/dayに変換する
+  var JST_FMT = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit",
+  });
+
+  function jstPartsOf(date) {
+    var parts = JST_FMT.formatToParts(date).reduce(function (acc, p) {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+    return {
+      year: parseInt(parts.year, 10),
+      month: parseInt(parts.month, 10),
+      day: parseInt(parts.day, 10),
+    };
+  }
+
+  // checked_at(ISO文字列, UTC) から「活動日」を計算する。
+  // crawl.pyは毎日JST 0:00に実行され、"前日24時との差分"を記録するため、
+  // 活動日 = checked_atのJSTカレンダー日 − 1日 となる。
+  // (notify.pyのreport_date計算と同じルール)
+  function activityDateFromChecked(checkedAtIso) {
+    var d = new Date(checkedAtIso);
+    var p = jstPartsOf(d);
+    var utcMidnightOfJstDate = Date.UTC(p.year, p.month - 1, p.day);
+    var prevDay = new Date(utcMidnightOfJstDate - 24 * 3600 * 1000);
+    return {
+      y: prevDay.getUTCFullYear(),
+      m: prevDay.getUTCMonth() + 1,
+      d: prevDay.getUTCDate(),
+      key: fmtDateKey(prevDay.getUTCFullYear(), prevDay.getUTCMonth() + 1, prevDay.getUTCDate()),
+    };
+  }
+
+  function fmtDateKey(y, m, d) {
+    return y + "-" + String(m).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+  }
+
+  function addMonths(year, month, diff) {
+    var total = (year * 12 + (month - 1)) + diff;
+    var y = Math.floor(total / 12);
+    var m = (total % 12) + 1;
+    return { year: y, month: m };
+  }
+
+  function daysInMonth(year, month) {
+    return new Date(Date.UTC(year, month, 0)).getUTCDate();
+  }
+
+  // ---------- Supabase REST ----------
+
+  // params: { key: value } の他、同じキーを複数条件で使いたい場合(PostgRESTの
+  // 「checked_at=gte.X&checked_at=lt.Y」のような範囲指定)のために
+  // { key: [value1, value2] } の形式もサポートする
+  function sbGet(path, params) {
+    var url = new URL(SUPABASE_URL.replace(/\/$/, "") + path);
+    Object.keys(params).forEach(function (k) {
+      var v = params[k];
+      if (Array.isArray(v)) {
+        v.forEach(function (single) { url.searchParams.append(k, single); });
+      } else {
+        url.searchParams.set(k, v);
+      }
+    });
+    return fetch(url.toString(), {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: "Bearer " + SUPABASE_ANON_KEY,
+      },
+    }).then(function (r) {
+      if (!r.ok) throw new Error("Supabaseへの通信に失敗しました (" + r.status + ")");
+      return r.json();
+    });
+  }
+
+  // ---------- アプリ本体 ----------
+
+  var storeSelect = document.getElementById("storeSelect");
+  var ymLabel = document.getElementById("ymLabel");
+  var calBody = document.getElementById("calBody");
+  var monthTotalEl = document.getElementById("monthTotal");
+  var prevBtn = document.getElementById("prevBtn");
+  var nextBtn = document.getElementById("nextBtn");
+  var statusEl = document.getElementById("statusMsg");
+  var calTable = document.querySelector("table.cal");
+  var totalBox = document.querySelector(".total-box");
+
+  // key(店舗名 or グループ名) -> { "yyyy-mm-dd": 件数 }
+  var dailyByKey = {};
+  var viewYear, viewMonth;      // 現在カレンダーに表示している年月
+  var minYear, minMonth;        // 閲覧可能な最も古い月（前月）
+  var maxYear, maxMonth;        // 閲覧可能な最も新しい月（当月）
+
+  function showStatus(msg, isErr) {
+    statusEl.style.display = "block";
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (isErr ? " err" : "");
+    calTable.style.display = "none";
+    totalBox.style.display = "none";
+  }
+  function hideStatus() {
+    statusEl.style.display = "none";
+    calTable.style.display = "table";
+    totalBox.style.display = "block";
+  }
+
+  function initApp() {
+    showStatus("読み込み中...", false);
+
+    var now = jstPartsOf(new Date());
+    maxYear = now.year; maxMonth = now.month;
+    // minYear/minMonthは実際のデータの最古月が分かってから確定させる（下のbuildAggregates参照）
+    minYear = now.year; minMonth = now.month;
+    viewYear = maxYear; viewMonth = maxMonth;
+
+    Promise.all([
+      sbGet("/rest/v1/stores", { select: "name,group_name", order: "name.asc" }),
+      fetchLogs(),
+    ]).then(function (results) {
+      var stores = results[0];
+      buildDropdown(stores);
+      buildAggregates(results[1]);
+      hideStatus();
+      renderCalendar();
+    }).catch(function (e) {
+      console.error(e);
+      showStatus("データの取得に失敗しました。時間をおいて再度お試しください。", true);
+    });
+  }
+
+  function fetchLogs() {
+    // データは削除せずすべて保持する方針なので、期間を絞らず全件取得する
+    // （limitはSupabase側のデフォルト件数制限に引っかからないよう明示的に大きめに指定）
+    return sbGet("/rest/v1/update_logs", {
+      select: "store_name,group_name,checked_at,new_count",
+      status: "eq.updated",
+      order: "checked_at.asc",
+      limit: 100000,
+    });
+  }
+
+  function buildAggregates(logs) {
+    dailyByKey = {};
+    dailyByKey[ALL_KEY] = {};
+
+    var minTotal = null; // year*12+(month-1) の最小値（実データの最古月を求めるため）
+
+    logs.forEach(function (log) {
+      var key = log.group_name || log.store_name;
+      var act = activityDateFromChecked(log.checked_at);
+      var count = log.new_count || 0;
+      if (!dailyByKey[key]) dailyByKey[key] = {};
+      dailyByKey[key][act.key] = (dailyByKey[key][act.key] || 0) + count;
+      dailyByKey[ALL_KEY][act.key] = (dailyByKey[ALL_KEY][act.key] || 0) + count;
+
+      var total = act.y * 12 + (act.m - 1);
+      if (minTotal === null || total < minTotal) minTotal = total;
+    });
+
+    if (minTotal !== null) {
+      var maxTotal = maxYear * 12 + (maxMonth - 1);
+      if (minTotal > maxTotal) minTotal = maxTotal; // 念のため未来日データがあっても当月止まりにする
+      minYear = Math.floor(minTotal / 12);
+      minMonth = (minTotal % 12) + 1;
+    }
+    // データが1件もない場合はminYear/minMonthはinitAppで設定した当月のままになる
+  }
+
+  function buildDropdown(stores) {
+    var groupNames = [];
+    var soloNames = [];
+    var seenGroups = {};
+
+    stores.forEach(function (s) {
+      if (s.group_name) {
+        if (!seenGroups[s.group_name]) {
+          seenGroups[s.group_name] = true;
+          groupNames.push(s.group_name);
+        }
+      } else {
+        soloNames.push(s.name);
+      }
+    });
+    groupNames.sort(function (a, b) { return a.localeCompare(b, "ja"); });
+    soloNames.sort(function (a, b) { return a.localeCompare(b, "ja"); });
+
+    var options = [{ value: ALL_KEY, label: ALL_LABEL }]
+      .concat(groupNames.map(function (g) { return { value: g, label: g }; }))
+      .concat(soloNames.map(function (n) { return { value: n, label: n }; }));
+
+    storeSelect.innerHTML = "";
+    options.forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      storeSelect.appendChild(opt);
+    });
+    storeSelect.value = ALL_KEY;
+    storeSelect.addEventListener("change", renderCalendar);
+  }
+
+  function isAtMin() { return viewYear === minYear && viewMonth === minMonth; }
+  function isAtMax() { return viewYear === maxYear && viewMonth === maxMonth; }
+
+  function renderCalendar() {
+    ymLabel.textContent = viewYear + "/" + String(viewMonth).padStart(2, "0");
+    prevBtn.disabled = isAtMin();
+    nextBtn.disabled = isAtMax();
+
+    var key = storeSelect.value;
+    var data = dailyByKey[key] || {};
+
+    var firstWeekday = new Date(Date.UTC(viewYear, viewMonth - 1, 1)).getUTCDay(); // 0=日
+    var numDays = daysInMonth(viewYear, viewMonth);
+    var todayParts = jstPartsOf(new Date());
+
+    calBody.innerHTML = "";
+    var row = document.createElement("tr");
+    for (var i = 0; i < firstWeekday; i++) {
+      var blank = document.createElement("td");
+      blank.className = "empty";
+      row.appendChild(blank);
+    }
+
+    var monthTotal = 0;
+    var day = 1;
+    var col = firstWeekday;
+    while (day <= numDays) {
+      var td = document.createElement("td");
+      var dateKey = fmtDateKey(viewYear, viewMonth, day);
+      var count = data[dateKey];
+
+      var isToday = todayParts.year === viewYear && todayParts.month === viewMonth && todayParts.day === day;
+      if (isToday) td.className = "today";
+
+      var numSpan = document.createElement("span");
+      numSpan.className = "day-num";
+      numSpan.textContent = day;
+      td.appendChild(numSpan);
+
+      if (count) {
+        monthTotal += count;
+        var countSpan = document.createElement("span");
+        countSpan.className = "day-count";
+        countSpan.textContent = count;
+        td.appendChild(countSpan);
+      }
+
+      row.appendChild(td);
+      col++;
+      if (col === 7) {
+        calBody.appendChild(row);
+        row = document.createElement("tr");
+        col = 0;
+      }
+      day++;
+    }
+    if (col !== 0) {
+      while (col < 7) {
+        var trailing = document.createElement("td");
+        trailing.className = "empty";
+        row.appendChild(trailing);
+        col++;
+      }
+      calBody.appendChild(row);
+    }
+
+    monthTotalEl.textContent = monthTotal + " 件";
+  }
+
+  prevBtn.addEventListener("click", function () {
+    if (isAtMin()) return;
+    var p = addMonths(viewYear, viewMonth, -1);
+    viewYear = p.year; viewMonth = p.month;
+    renderCalendar();
+  });
+  nextBtn.addEventListener("click", function () {
+    if (isAtMax()) return;
+    var n = addMonths(viewYear, viewMonth, 1);
+    viewYear = n.year; viewMonth = n.month;
+    renderCalendar();
+  });
+
+  initApp();
+})();
+</script>
+</body>
+</html>
