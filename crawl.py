@@ -28,6 +28,18 @@ PROFILE_URL_PATTERN = re.compile(r"/profile\.html\?id=[0-9a-f]{16,}", re.IGNOREC
 # 文脈で件数を表示するデフォルト対象（storesの`is_staff_list`列で個別に上書き可能）
 DEFAULT_STAFF_LIST_TYPES = {"cast_list", "girl_list", "profile_list"}
 
+# 一部サイトは「User-Agentがブラウザではなくプログラムっぽい」と判定すると
+# アクセスそのものを拒否する(403 Forbidden)ことがあるため、実際のブラウザに
+# 近いヘッダーを送るようにしている（それでも回避できない場合もある）
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+}
+
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
@@ -105,7 +117,7 @@ def fetch_rss_links(url):
 
 def fetch_cast_list_links(url):
     """キャスト一覧ページから、個別キャストページ（cast/数字.html）のリンクのみを抽出する"""
-    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     hrefs = []
@@ -120,7 +132,7 @@ def fetch_cast_list_links(url):
 
 def fetch_girl_list_links(url):
     """女性一覧ページから、個別ページ（girl/数字/）のリンクのみを抽出する（girlreview等は除外）"""
-    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     hrefs = []
@@ -139,7 +151,7 @@ def fetch_girl_list_links(url):
 
 def fetch_profile_list_links(url):
     """セラピスト一覧ページから、個別プロフィールページ（profile.html?id=xxx）のリンクのみを抽出する"""
-    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     hrefs = []
@@ -170,7 +182,7 @@ def fetch_pattern_list_links(url, pattern):
     if not pattern:
         raise ValueError("type=custom_patternのお店にはlink_pattern（正規表現）の設定が必要です")
     compiled = re.compile(pattern)
-    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     all_anchors = soup.find_all("a", href=True)
@@ -202,7 +214,7 @@ def fetch_pattern_list_links(url, pattern):
 
 
 def fetch_page_links(url):
-    r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     links = []
