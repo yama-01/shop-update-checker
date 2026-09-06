@@ -153,26 +153,52 @@ def fetch_profile_list_links(url):
 
 
 def fetch_pattern_list_links(url, pattern):
-    """お店ごとに登録された正規表現（link_pattern）に一致するリンクのみを抽出する汎用関数。
+    """お店ごとに登録された正規表現（link_pattern）に一致するリンクを抽出する汎用関数。
     サイトごとにURL構造がバラバラなため、コードを直接変更しなくても
-    Supabase側の設定だけで新しいサイト構造に対応できるようにするためのもの。"""
+    Supabase側の設定だけで新しいサイト構造に対応できるようにするためのもの。
+
+    戻り値は (表示用の完全なURL, 新着判定用の識別キー) のタプルのリスト。
+    識別キーには「正規表現が一致した部分の文字列」をそのまま使う。こうすることで、
+    ・パスにIDが含まれるサイト（例: /girls/detail/85574?ref=xxx）
+      → クエリ部分はパターンに含まれていないため自動的にキーから除かれ、
+        追跡パラメータ違いによる重複カウントを防げる
+    ・クエリ文字列にIDが含まれるサイト（例: girl.php?id=12345）
+      → パターンにクエリ部分を含めて書けば、そのままキーに反映され、
+        人物ごとに正しく区別できる
+    のどちらにも、link_patternの書き方だけで対応できる（以前のように内部で
+    問答無用にクエリを切り捨てる処理はしない）。"""
     if not pattern:
         raise ValueError("type=custom_patternのお店にはlink_pattern（正規表現）の設定が必要です")
     compiled = re.compile(pattern)
     r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-    hrefs = []
-    seen_in_page = set()
-    for a in soup.find_all("a", href=True):
+    all_anchors = soup.find_all("a", href=True)
+    results = []
+    seen_keys_in_page = set()
+    for a in all_anchors:
         href = urljoin(url, a["href"])
-        # クエリやフラグメントを除いた素のURLで判定・保存する（?ref=xxxのような追跡パラメータで
-        # 同じページが別リンクとして重複検知されるのを防ぐ）
-        clean_href = href.split("?")[0].split("#")[0]
-        if compiled.search(clean_href) and clean_href not in seen_in_page:
-            seen_in_page.add(clean_href)
-            hrefs.append(clean_href)
-    return hrefs
+        m = compiled.search(href)
+        if not m:
+            continue
+        key = m.group(0)
+        if key not in seen_keys_in_page:
+            seen_keys_in_page.add(key)
+            results.append((href, key))
+
+    # 1件もマッチしなかった場合は、link_patternの書き間違いだけでなく、
+    # 「JavaScriptで後からリンクが追加される作りのサイトで、プログラムには
+    # 空のページしか見えていない」等の可能性もあるため、原因の切り分けに
+    # 役立つ情報をログに残しておく。
+    if not results:
+        print(
+            f"[警告] custom_patternが0件マッチ: url={url} "
+            f"HTTPステータス={r.status_code} 本文文字数={len(r.text)} "
+            f"ページ内の総リンク数={len(all_anchors)}件",
+            file=sys.stderr,
+        )
+
+    return results
 
 
 def fetch_page_links(url):
@@ -205,6 +231,9 @@ def main():
         if is_staff_list is None:
             is_staff_list = store_type in DEFAULT_STAFF_LIST_TYPES
 
+        # key_of: href(表示用URL) -> 新着判定に使う識別キー のマップ。
+        # custom_pattern以外はhref自身をそのままキーとして使うため、Noneのままでよい。
+        key_of = None
         try:
             if store_type == "rss":
                 links = fetch_rss_links(store["url"])
@@ -216,8 +245,12 @@ def main():
             elif store_type == "profile_list":
                 links = [(None, href) for href in fetch_profile_list_links(store["url"])]
             elif store_type == "custom_pattern":
-                # お店ごとにSupabaseのlink_pattern列で正規表現を設定してもらう汎用タイプ
-                links = [(None, href) for href in fetch_pattern_list_links(store["url"], store.get("link_pattern"))]
+                # お店ごとにSupabaseのlink_pattern列で正規表現を設定してもらう汎用タイプ。
+                # 新着判定には「正規表現が一致した部分の文字列」を識別キーとして使う
+                # （パスにIDがあるサイトにも、クエリ文字列にIDがあるサイトにも対応するため）
+                items = fetch_pattern_list_links(store["url"], store.get("link_pattern"))
+                links = [(None, href) for href, key in items]
+                key_of = {href: key for href, key in items}
             else:
                 links = fetch_page_links(store["url"])
         except Exception as e:
@@ -228,17 +261,18 @@ def main():
         seen = set(store.get("seen_links") or [])
         is_first_check = len(seen) == 0
 
-        current_hrefs = []
+        current_keys = []
         new_items = []
-        new_item_hrefs = set()
+        new_item_keys = set()
         for title, href in links:
-            if href not in current_hrefs:
-                current_hrefs.append(href)
-            # 同じURLがページ内の複数箇所（例：中央の一覧と右カラムに両方表示される等）に
+            key = key_of.get(href, href) if key_of else href
+            if key not in current_keys:
+                current_keys.append(key)
+            # 同じ項目がページ内の複数箇所（例：中央の一覧と右カラムに両方表示される等）に
             # 出てきても、新着としては1件だけカウントする
-            if href not in seen and href not in new_item_hrefs:
+            if key not in seen and key not in new_item_keys:
                 new_items.append((title, href))
-                new_item_hrefs.add(href)
+                new_item_keys.add(key)
 
         # 初回チェック時は基準データを保存するだけ（大量通知を防ぐため「更新あり」とはしない）
         if is_first_check:
@@ -251,12 +285,12 @@ def main():
             log_check_result(store_id, name, group_name, store_type, is_staff_list, "no_update", [])
             print(f"[更新なし] {name}")
 
-        # 既知リンクとして必ず保存する（重要：今回取得できたリンクだけで上書きせず、
-        # これまでの既知リンクと合算（マージ）する。ページの表示順や一部入れ替わりで
-        # 今回たまたま表示されなかった過去のリンクも既知として保持し続けることで、
+        # 既知の項目として必ず保存する（重要：今回取得できた分だけで上書きせず、
+        # これまでの既知の項目と合算（マージ）する。ページの表示順や一部入れ替わりで
+        # 今回たまたま表示されなかった過去の項目も既知として保持し続けることで、
         # 同じ項目を繰り返し「新着」と誤検知しないようにする）
-        merged_links = list(seen | set(current_hrefs))
-        update_store(store_id, merged_links[:MAX_LINKS_STORED])
+        merged_keys = list(seen | set(current_keys))
+        update_store(store_id, merged_keys[:MAX_LINKS_STORED])
 
     print("[巡回完了] 結果をupdate_logsに記録しました（LINE通知は次回のnotify.py実行時に送信されます）")
 
