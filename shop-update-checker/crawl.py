@@ -1,0 +1,335 @@
+"""
+毎日0時(JST)に実行する巡回スクリプト。
+登録された「お店」のページを巡回し、前回チェック時からの差分（新着）を検知して
+Supabaseのupdate_logsに記録する。LINE通知はここでは行わない
+（通知は notify.py が9時に別途実行して担当する）。
+
+GitHub Actionsから毎日0時(JST)に定期実行される想定。
+"""
+
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from urllib.parse import urljoin
+
+import feedparser
+import requests
+from bs4 import BeautifulSoup
+
+# 「cast/123456.html」のようなキャスト個別ページのURLパターン
+CAST_URL_PATTERN = re.compile(r"/cast/\d+\.html$")
+# 「girl/115/」のような女性個別ページのURLパターン（girlreview等の下位ページは除外）
+GIRL_URL_PATTERN = re.compile(r"/girl/\d+/$")
+# 「profile.html?id=xxxxxxxx」のようなプロフィールページのURLパターン
+PROFILE_URL_PATTERN = re.compile(r"/profile\.html\?id=[0-9a-f]{16,}", re.IGNORECASE)
+
+# type=cast_list / girl_list / profile_list / custom_patternのお店は「新人が入店した」という
+# 文脈で件数を表示するデフォルト対象（storesの`is_staff_list`列で個別に上書き可能）
+DEFAULT_STAFF_LIST_TYPES = {"cast_list", "girl_list", "profile_list"}
+
+# 一部サイトは「User-Agentがブラウザではなくプログラムっぽい」と判定すると
+# アクセスそのものを拒否する(403 Forbidden)ことがあるため、実際のブラウザに
+# 近いヘッダーを送るようにしている（それでも回避できない場合もある）
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+}
+
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+}
+
+MAX_LINKS_STORED = 2000
+# update_logsに保存する新着リンクのサンプル件数（表示・記録用の上限。件数自体はnew_countで正確に保持する）
+SAMPLE_ITEMS_LIMIT = 10
+
+
+def get_stores():
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/stores?enabled=eq.true&select=*",
+        headers=HEADERS,
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def update_store(store_id, seen_links):
+    requests.patch(
+        f"{SUPABASE_URL}/rest/v1/stores?id=eq.{store_id}",
+        headers=HEADERS,
+        json={
+            "seen_links": seen_links,
+            "last_checked_at": datetime.now(timezone.utc).isoformat(),
+        },
+        timeout=20,
+    )
+
+
+def log_check_result(store_id, store_name, group_name, store_type, is_staff_list, status, new_items_all, error_message=None):
+    """このチェック結果をupdate_logsに記録する。new_countは実際の新着数を正確に保持し、
+    new_itemsにはSAMPLE_ITEMS_LIMIT件までのサンプルのみ保存する（通知メッセージの表示用）。"""
+    payload = {
+        "store_id": store_id,
+        "store_name": store_name,
+        "group_name": group_name,
+        "store_type": store_type,
+        "is_staff_list": is_staff_list,
+        "status": status,
+        "new_count": len(new_items_all),
+        "new_items": [
+            {"title": title, "url": href} for title, href in new_items_all[:SAMPLE_ITEMS_LIMIT]
+        ],
+    }
+    if error_message:
+        payload["error_message"] = error_message[:500]
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/update_logs",
+            headers=HEADERS,
+            json=payload,
+            timeout=20,
+        )
+        if r.status_code >= 300:
+            print(f"[ログ保存エラー] {store_name}: {r.status_code} {r.text}", file=sys.stderr)
+    except Exception as e:
+        print(f"[ログ保存エラー] {store_name}: {e}", file=sys.stderr)
+
+
+def fetch_rss_links(url):
+    feed = feedparser.parse(url)
+    return [
+        (e.get("title", url).strip(), e.get("link", url))
+        for e in feed.entries[:30]
+        if e.get("link")
+    ]
+
+
+def fetch_cast_list_links(url):
+    """キャスト一覧ページから、個別キャストページ（cast/数字.html）のリンクのみを抽出する"""
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    hrefs = []
+    seen_in_page = set()
+    for a in soup.find_all("a", href=True):
+        href = urljoin(url, a["href"])
+        if CAST_URL_PATTERN.search(href) and href not in seen_in_page:
+            seen_in_page.add(href)
+            hrefs.append(href)
+    return hrefs
+
+
+def fetch_girl_list_links(url):
+    """女性一覧ページから、個別ページ（girl/数字/）のリンクのみを抽出する（girlreview等は除外）"""
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    hrefs = []
+    seen_in_page = set()
+    for a in soup.find_all("a", href=True):
+        href = urljoin(url, a["href"])
+        # クエリやフラグメントを除いた素のパスで判定する
+        clean_href = href.split("?")[0].split("#")[0]
+        if not clean_href.endswith("/"):
+            clean_href += "/"
+        if GIRL_URL_PATTERN.search(clean_href) and clean_href not in seen_in_page:
+            seen_in_page.add(clean_href)
+            hrefs.append(clean_href)
+    return hrefs
+
+
+def fetch_profile_list_links(url):
+    """セラピスト一覧ページから、個別プロフィールページ（profile.html?id=xxx）のリンクのみを抽出する"""
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    hrefs = []
+    seen_in_page = set()
+    for a in soup.find_all("a", href=True):
+        href = urljoin(url, a["href"])
+        if PROFILE_URL_PATTERN.search(href) and href not in seen_in_page:
+            seen_in_page.add(href)
+            hrefs.append(href)
+    return hrefs
+
+
+def fetch_pattern_list_links(url, pattern, container_selector=None):
+    """お店ごとに登録された正規表現（link_pattern）に一致するリンクを抽出する汎用関数。
+    サイトごとにURL構造がバラバラなため、コードを直接変更しなくても
+    Supabase側の設定だけで新しいサイト構造に対応できるようにするためのもの。
+
+    戻り値は (表示用の完全なURL, 新着判定用の識別キー) のタプルのリスト。
+    識別キーには「正規表現が一致した部分の文字列」をそのまま使う。こうすることで、
+    ・パスにIDが含まれるサイト（例: /girls/detail/85574?ref=xxx）
+      → クエリ部分はパターンに含まれていないため自動的にキーから除かれ、
+        追跡パラメータ違いによる重複カウントを防げる
+    ・クエリ文字列にIDが含まれるサイト（例: girl.php?id=12345）
+      → パターンにクエリ部分を含めて書けば、そのままキーに反映され、
+        人物ごとに正しく区別できる
+    のどちらにも、link_patternの書き方だけで対応できる（以前のように内部で
+    問答無用にクエリを切り捨てる処理はしない）。
+
+    container_selector（任意, storesの`link_container_selector`列）を指定すると、
+    ページ全体ではなく、そのCSSセレクタに一致する要素の中だけを見るようになる。
+    「中央カラムは拾いたいが、右カラム（ランキング等）の同じ形式のリンクは
+    拾いたくない」といったサイトで、ページ内の特定エリアだけに絞り込むために使う。
+    未設定の場合は今まで通りページ全体が対象になる。"""
+    if not pattern:
+        raise ValueError("type=custom_patternのお店にはlink_pattern（正規表現）の設定が必要です")
+    compiled = re.compile(pattern)
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    if container_selector:
+        container = soup.select_one(container_selector)
+        if container is None:
+            print(
+                f"[警告] link_container_selectorに一致する要素が見つかりません: "
+                f"url={url} selector={container_selector!r}（ページ構造が変わった可能性があります）",
+                file=sys.stderr,
+            )
+            all_anchors = []
+        else:
+            all_anchors = container.find_all("a", href=True)
+    else:
+        all_anchors = soup.find_all("a", href=True)
+
+    results = []
+    seen_keys_in_page = set()
+    for a in all_anchors:
+        href = urljoin(url, a["href"])
+        m = compiled.search(href)
+        if not m:
+            continue
+        key = m.group(0)
+        if key not in seen_keys_in_page:
+            seen_keys_in_page.add(key)
+            results.append((href, key))
+
+    # 1件もマッチしなかった場合は、link_patternの書き間違いだけでなく、
+    # 「JavaScriptで後からリンクが追加される作りのサイトで、プログラムには
+    # 空のページしか見えていない」等の可能性もあるため、原因の切り分けに
+    # 役立つ情報をログに残しておく。
+    if not results:
+        print(
+            f"[警告] custom_patternが0件マッチ: url={url} "
+            f"HTTPステータス={r.status_code} 本文文字数={len(r.text)} "
+            f"ページ内の総リンク数={len(all_anchors)}件",
+            file=sys.stderr,
+        )
+
+    return results
+
+
+def fetch_page_links(url):
+    r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    links = []
+    seen_hrefs = set()
+    for a in soup.find_all("a", href=True):
+        href = urljoin(url, a["href"])
+        title = a.get_text(strip=True)
+        # 同じリンクがページ内の複数箇所（一覧と右カラムなど）に出てきても1件だけ拾う
+        if title and href.startswith("http") and href not in seen_hrefs:
+            seen_hrefs.add(href)
+            links.append((title, href))
+    return links[:150]
+
+
+def main():
+    stores = get_stores()
+    print(f"{len(stores)}件のお店をチェックします")
+
+    for store in stores:
+        store_id = store["id"]
+        name = store["name"]
+        store_type = store["type"]
+        group_name = store.get("group_name")
+        # is_staff_listが未設定(null)の場合は、typeから自動判定する
+        is_staff_list = store.get("is_staff_list")
+        if is_staff_list is None:
+            is_staff_list = store_type in DEFAULT_STAFF_LIST_TYPES
+
+        # key_of: href(表示用URL) -> 新着判定に使う識別キー のマップ。
+        # custom_pattern以外はhref自身をそのままキーとして使うため、Noneのままでよい。
+        key_of = None
+        try:
+            if store_type == "rss":
+                links = fetch_rss_links(store["url"])
+            elif store_type == "cast_list":
+                # cast_listはURLのみのリストなので (title, href) の形に揃える
+                links = [(None, href) for href in fetch_cast_list_links(store["url"])]
+            elif store_type == "girl_list":
+                links = [(None, href) for href in fetch_girl_list_links(store["url"])]
+            elif store_type == "profile_list":
+                links = [(None, href) for href in fetch_profile_list_links(store["url"])]
+            elif store_type == "custom_pattern":
+                # お店ごとにSupabaseのlink_pattern列で正規表現を設定してもらう汎用タイプ。
+                # 新着判定には「正規表現が一致した部分の文字列」を識別キーとして使う
+                # （パスにIDがあるサイトにも、クエリ文字列にIDがあるサイトにも対応するため）
+                items = fetch_pattern_list_links(
+                    store["url"],
+                    store.get("link_pattern"),
+                    store.get("link_container_selector"),
+                )
+                links = [(None, href) for href, key in items]
+                key_of = {href: key for href, key in items}
+            else:
+                links = fetch_page_links(store["url"])
+        except Exception as e:
+            print(f"[エラー] {name}: {e}", file=sys.stderr)
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "error", [], error_message=str(e))
+            continue
+
+        seen = set(store.get("seen_links") or [])
+        is_first_check = len(seen) == 0
+
+        current_keys = []
+        new_items = []
+        new_item_keys = set()
+        for title, href in links:
+            key = key_of.get(href, href) if key_of else href
+            if key not in current_keys:
+                current_keys.append(key)
+            # 同じ項目がページ内の複数箇所（例：中央の一覧と右カラムに両方表示される等）に
+            # 出てきても、新着としては1件だけカウントする
+            if key not in seen and key not in new_item_keys:
+                new_items.append((title, href))
+                new_item_keys.add(key)
+
+        # 初回チェック時は基準データを保存するだけ（大量通知を防ぐため「更新あり」とはしない）
+        if is_first_check:
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "first_check", [])
+            print(f"[初回] {name}")
+        elif new_items:
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "updated", new_items)
+            print(f"[更新あり] {name}: {len(new_items)}件の新着")
+        else:
+            log_check_result(store_id, name, group_name, store_type, is_staff_list, "no_update", [])
+            print(f"[更新なし] {name}")
+
+        # 既知の項目として必ず保存する（重要：今回取得できた分だけで上書きせず、
+        # これまでの既知の項目と合算（マージ）する。ページの表示順や一部入れ替わりで
+        # 今回たまたま表示されなかった過去の項目も既知として保持し続けることで、
+        # 同じ項目を繰り返し「新着」と誤検知しないようにする）
+        merged_keys = list(seen | set(current_keys))
+        update_store(store_id, merged_keys[:MAX_LINKS_STORED])
+
+    print("[巡回完了] 結果をupdate_logsに記録しました（LINE通知は次回のnotify.py実行時に送信されます）")
+
+
+if __name__ == "__main__":
+    main()
