@@ -185,7 +185,7 @@ def fetch_pattern_list_links(url, pattern, container_selector=None):
     r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-        if container_selector:
+    if container_selector:
         container = soup.select_one(container_selector)
         if container is None:
             raise ValueError(
