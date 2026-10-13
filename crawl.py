@@ -185,15 +185,15 @@ def fetch_pattern_list_links(url, pattern, container_selector=None):
     r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-    if container_selector:
-    container = soup.select_one(container_selector)
-    if container is None:
-        raise ValueError(
-            f"CSSセレクタに一致する要素がありません: {container_selector}"
-        )
-    all_anchors = container.find_all("a", href=True)
-else:
-    all_anchors = soup.find_all("a", href=True)
+        if container_selector:
+        container = soup.select_one(container_selector)
+        if container is None:
+            raise ValueError(
+                f"CSSセレクタに一致する要素がありません: {container_selector}"
+            )
+        all_anchors = container.find_all("a", href=True)
+    else:
+        all_anchors = soup.find_all("a", href=True)
     results = []
     seen_keys_in_page = set()
     for a in all_anchors:
