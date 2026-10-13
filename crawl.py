@@ -164,7 +164,7 @@ def fetch_profile_list_links(url):
     return hrefs
 
 
-def fetch_pattern_list_links(url, pattern):
+def fetch_pattern_list_links(url, pattern, container_selector=None):
     """お店ごとに登録された正規表現（link_pattern）に一致するリンクを抽出する汎用関数。
     サイトごとにURL構造がバラバラなため、コードを直接変更しなくても
     Supabase側の設定だけで新しいサイト構造に対応できるようにするためのもの。
@@ -185,6 +185,14 @@ def fetch_pattern_list_links(url, pattern):
     r = requests.get(url, timeout=20, headers=BROWSER_HEADERS)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
+    if container_selector:
+    container = soup.select_one(container_selector)
+    if container is None:
+        raise ValueError(
+            f"CSSセレクタに一致する要素がありません: {container_selector}"
+        )
+    all_anchors = container.find_all("a", href=True)
+else:
     all_anchors = soup.find_all("a", href=True)
     results = []
     seen_keys_in_page = set()
@@ -260,7 +268,11 @@ def main():
                 # お店ごとにSupabaseのlink_pattern列で正規表現を設定してもらう汎用タイプ。
                 # 新着判定には「正規表現が一致した部分の文字列」を識別キーとして使う
                 # （パスにIDがあるサイトにも、クエリ文字列にIDがあるサイトにも対応するため）
-                items = fetch_pattern_list_links(store["url"], store.get("link_pattern"))
+                items = fetch_pattern_list_links(
+    store["url"],
+    store.get("link_pattern"),
+    store.get("link_container_selector"),
+)
                 links = [(None, href) for href, key in items]
                 key_of = {href: key for href, key in items}
             else:
