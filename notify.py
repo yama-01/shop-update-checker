@@ -97,7 +97,7 @@ def build_group_block(group_name, members):
         if remaining > 0:
             lines.append(f"…ほか{remaining}件")
     elif no_update:
-        lines.append(header + "更新なし")
+        lines.append(header + "入店なし")
     elif first_check:
         lines.append(header + "初回チェックのため基準データを保存しました")
     else:
