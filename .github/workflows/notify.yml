@@ -1,9 +1,9 @@
-name: Notify LINE (daily at 9:00 JST)
+name: Notify LINE (daily at 7:00 JST)
 
 on:
   schedule:
-    # 毎日1回、日本時間9:00に実行（UTC基準で0:00。時間を変えたい場合はここを調整）
-    - cron: "0 0 * * *"
+    # 毎日1回、日本時間7:00に実行（UTC基準で前日22:00）
+    - cron: "0 22 * * *"
   workflow_dispatch: # 手動実行ボタンも使えるようにする
 
 jobs:
