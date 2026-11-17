@@ -72,7 +72,14 @@ def build_group_block(group_name, members):
     updated = [m for m in members if m["status"] == "updated"]
     no_update = [m for m in members if m["status"] == "no_update"]
     first_check = [m for m in members if m["status"] == "first_check"]
-    errors = [m for m in members if m["status"] == "error"]
+    # ログは checked_at.asc で取得済み。店舗ごとの最新結果で未復旧を判定する。
+    latest = {}
+    for m in members:
+        latest[m.get("store_id") or m["store_name"]] = m
+    errors = [m for m in latest.values() if m["status"] == "error"]
+    all_failed = bool(latest) and len(errors) == len(latest)
+    for m in errors:
+        print(f"[未復旧] {m['store_name']}: {m.get('error_message') or '詳細なし'}", file=sys.stderr)
 
     header = f"【{group_name}】"
     lines = []
@@ -96,23 +103,24 @@ def build_group_block(group_name, members):
         remaining = total_new - len(shown)
         if remaining > 0:
             lines.append(f"…ほか{remaining}件")
+    elif all_failed:
+        lines.append(header + "集計確認中")
     elif no_update:
         lines.append(header + "入店なし")
     elif first_check:
         lines.append(header + "初回チェックのため基準データを保存しました")
     else:
         # メンバー全員がエラーだった場合
-        lines.append(header + "チェックに失敗しました")
+        lines.append(header + "集計確認中")
 
     # 一部の店舗だけ初回チェック中だった場合の補足
     if (updated or no_update) and first_check:
         names = "、".join(m["store_name"] for m in first_check)
         lines.append(f"(初回チェック中: {names})")
 
-    # エラーだった店舗の個別表示（グループ全体がエラーの場合は上ですでに表示済みなので除く）
-    if errors and (updated or no_update or first_check):
-        for m in errors:
-            lines.append(f"⚠️{m['store_name']}のチェックに失敗しました")
+    # 利用者向けには未復旧の店舗がある場合だけ、集計状況を補足する。
+    if errors and (updated or (not all_failed and (no_update or first_check))):
+        lines.append("※一部店舗は集計確認中" if not all_failed else "※集計確認中")
 
     return "\n".join(lines)
 
@@ -125,7 +133,7 @@ def main():
         print("本日分のチェック結果が見つかりません（crawl.pyがまだ実行されていない可能性があります）")
         send_line(
             f"◆{report_date}の更新チェック結果\n\n"
-            "チェック結果が見つかりませんでした。crawl.pyの実行状況を確認してください。"
+            "集計確認中"
         )
         return
 
